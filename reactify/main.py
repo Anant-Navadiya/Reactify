@@ -1,8 +1,9 @@
 import argparse
 
+from reactify.frameworks.next import NextConverter
 from reactify.frameworks.react import ReactConverter
 
-SUPPORTED_FRAMEWORKS = ['react']
+SUPPORTED_FRAMEWORKS = ['react','next']
 
 
 def process_framework(framework_name, project_name):
@@ -11,6 +12,7 @@ def process_framework(framework_name, project_name):
 
     handlers = {
         'react': make_class_handler(ReactConverter),
+        'next': make_class_handler(NextConverter),
     }
 
     handler = handlers.get(framework_name)
