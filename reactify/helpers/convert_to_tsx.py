@@ -1,18 +1,48 @@
 import re
-from bs4 import BeautifulSoup, Tag, NavigableString
-import google.generativeai as genai
-
+from bs4 import BeautifulSoup
 from reactify.helpers.parsers import parse_col_class
 
-GOOGLE_AI_API_KEY = "AIzaSyDnz0sDE6qAEHOeK3M4ESzVmqsXbSz6q_c"
+# Known Bootstrap variants
+VARIANTS = ["primary", "secondary", "success", "danger", "warning", "info", "light", "dark", "link"]
 
-genai.configure(api_key=GOOGLE_AI_API_KEY)
-
-
-JSX_ATTRIBUTE_MAP = {
-    "class": "className", "for": "htmlFor","tabindex":"tabIndex", "onclick": "onClick", "onchange": "onChange",
+# Prefix-to-component map for variant handling
+VARIANT_MAPPING = {
+    "btn-": "Button",
+    "alert-": "Alert",
+    "badge-": "Badge",
+    "text-bg-": "div",
 }
 
+# JSX-safe attribute renames
+JSX_ATTRIBUTE_MAP = {
+    "class": "className", "for": "htmlFor", "onclick": "onClick", "onchange": "onChange",
+}
+
+
+def get_variant_from_class(cls):
+    """Return (component, variant) tuple if the class matches a known variant pattern"""
+    for prefix, component in VARIANT_MAPPING.items():
+        if cls.startswith(prefix):
+            variant = cls[len(prefix):]
+            if variant in VARIANTS:
+                return component, variant
+    return None, None
+
+
+def should_strip_class(cls, component_type):
+    """Return True if class is handled as variant or by structural rule"""
+    comp, variant = get_variant_from_class(cls)
+    if comp and comp.lower() == component_type.lower():
+        return True
+    for rule in REACT_BOOTSTRAP_RULES.values():
+        if rule["component"].split(".")[0].lower() == component_type.lower() and rule["match"](cls):
+            return True
+    return False
+
+
+COL_PATTERN = re.compile(r"^col(-(sm|md|lg|xl|xxl))?(-[0-9]+|-(auto))?$")
+
+# Basic structural/component rules
 REACT_BOOTSTRAP_RULES = {
     "container": {"component": "Container", "match": lambda c: c == "container", "props": lambda c: {}},
     "container-fluid": {"component": "Container", "match": lambda c: c == "container-fluid",
@@ -20,177 +50,112 @@ REACT_BOOTSTRAP_RULES = {
     "row": {"component": "Row", "match": lambda c: c == "row", "props": lambda c: {}},
     "col": {
         "component": "Col",
-        "match": lambda c: c == "col" or c.startswith("col-"),
+        "match": lambda c: bool(COL_PATTERN.match(c)),
         "props": lambda c: parse_col_class(c)
     },
-    "alert": {"component": "Alert", "match": lambda c: c.startswith("alert"),
-              "props": lambda c: {"variant": c.replace("alert-", "")}},
-    "btn": {"component": "Button", "match": lambda c: c.startswith("btn-"),
-            "props": lambda c: {"variant": c.replace("btn-", "")}},
+
+    "alert": {"component": "Alert", "match": lambda c: c == "alert", "props": lambda c: {}},
+
+    "btn": {"component": "Button", "match": lambda c: c == "btn", "props": lambda c: {}},
     "btn-lg": {"component": "Button", "match": lambda c: c == "btn-lg", "props": lambda c: {"size": "lg"}},
     "btn-sm": {"component": "Button", "match": lambda c: c == "btn-sm", "props": lambda c: {"size": "sm"}},
+
     "card": {"component": "Card", "match": lambda c: c == "card", "props": lambda c: {}},
-    "card-body": {"component": "Card.Body", "match": lambda c: c == "card-body", "props": lambda c: {}},
-    "card-header": {"component": "Card.Header", "match": lambda c: c == "card-header", "props": lambda c: {}},
-    "card-footer": {"component": "Card.Footer", "match": lambda c: c == "card-footer", "props": lambda c: {}},
-    "form-control": {"component": "Form.Control", "match": lambda c: c == "form-control", "props": lambda c: {}},
-    "form-group": {"component": "Form.Group", "match": lambda c: c == "form-group", "props": lambda c: {}},
+    "card-body": {"component": "CardBody", "match": lambda c: c == "card-body", "props": lambda c: {}},
+    "card-header": {"component": "CardHeader", "match": lambda c: c == "card-header", "props": lambda c: {}},
+    "card-footer": {"component": "CardFooter", "match": lambda c: c == "card-footer", "props": lambda c: {}},
+
+    "form-label": {"component": "FormLabel", "match": lambda c: c == "form-label", "props": lambda c: {}},
+    "form-control": {"component": "FormControl", "match": lambda c: c == "form-control", "props": lambda c: {}},
+    "form-group": {"component": "FormGroup", "match": lambda c: c == "form-group", "props": lambda c: {}},
+
+    "dropdown": {"component": "Dropdown", "match": lambda c: c == "dropdown", "props": lambda c: {}},
+    "dropdown-menu": {"component": "DropdownMenu", "match": lambda c: c == "dropdown-menu", "props": lambda c: {}},
+    "dropdown-item": {"component": "DropdownItem", "match": lambda c: c == "dropdown-item", "props": lambda c: {}},
 }
-
-def generate_component_with_gemini(html_snippet: str, component_name: str, additional_instructions: str = "") -> str:
-    """
-    Uses Gemini to generate a React functional component (with props and types)
-    from an HTML snippet.
-    """
-    try:
-        model = genai.GenerativeModel('gemini-pro')
-        prompt = f"""
-        You are an expert React Bootstrap developer.
-        Use React Bootstrap components where appropriate.
-        If there's sample data implied in the HTML, create a simple example data array with type inference.
-        Formate code as JSX or TSX.
-
-        Return ONLY the React component code, including the TypeScript interface,
-        any necessary React and React Bootstrap imports, and example data if inferred.
-        Do NOT include any surrounding text or markdown blocks, unless explicitly for code block.
-
-        HTML Snippet:
-        ```html
-        {html_snippet}
-        ```
-
-        {additional_instructions}
-        """
-        response = model.generate_content(prompt)
-
-        # Basic parsing to extract code block if Gemini wraps it
-        generated_code = ""
-        if response.candidates and response.candidates[0].content.parts:
-            text_content = response.candidates[0].content.parts[0].text
-            # Attempt to extract content from markdown code blocks
-            match_jsx = re.search(r'```(?:jsx|tsx)?\s*(.*?)\s*```', text_content, re.DOTALL)
-            if match_jsx:
-                generated_code = match_jsx.group(1).strip()
-            else:
-                generated_code = text_content.strip() # Fallback if no markdown block
-        return generated_code
-
-    except Exception as e:
-        print(f"Error calling Gemini API for {component_name}: {e}")
-        return f"{{/* Gemini failed to generate component '{component_name}' for the following HTML: \n{html_snippet}\n Error: {e} */}}"
 
 
 def convert_to_tsx(html_content):
-    used_components = set()  # For React Bootstrap components
+    used_components = set()
 
-    # Remove HTML comments and @@include directives before parsing
-    html_content = re.sub(r"", "", html_content, flags=re.DOTALL)
-    # Simple @@include handling: replace with a placeholder comment or empty string
-    html_content = re.sub(r"@@include\((.*?)\)",
-                          lambda m: f"{{/* {m.group(0)} */}}" if "," in m.group(0) else "", html_content)
+    # Remove HTML comments
+    html_content = re.sub(r"<!--.*?-->", "", html_content, flags=re.DOTALL)
+
+    # Comment out all @@include(...) directives (including multiline)
+    html_content = re.sub(
+        r"@@include\((.*?)\)",
+        lambda m: f"{{/* {m.group(0)} */}}",
+        html_content,
+        flags=re.DOTALL
+    )
 
     soup = BeautifulSoup(html_content, "html.parser")
-
-    # Find the main content area. Prefer data-content, then body, then the whole soup
-    content_tag = soup.find(attrs={"data-content": True}) or soup.body or soup
-    # Ensure we get the *contents* if it's a specific tag, otherwise the whole thing
-    if isinstance(content_tag, Tag):
-        inner_html = content_tag.decode_contents()
-    else:  # If soup itself is the content_tag
-        inner_html = str(content_tag)
-
+    content = soup.find(attrs={"data-content": True}) or soup.body or soup
+    inner_html = content.decode_contents() if hasattr(content, "decode_contents") else str(content)
     tsx_soup = BeautifulSoup(inner_html, "html.parser")
 
-    # The entire Gemini-specific processing block is removed.
-    # The loop will now directly apply the React Bootstrap rules.
-    for tag_to_process in list(tsx_soup.find_all(True)):
-        original_classes = tag_to_process.get("class", [])
+    for tag in tsx_soup.find_all(True):
+        original_classes = tag.get("class", [])
         new_props = {}
 
-        # React-Bootstrap mapping
+        # React-Bootstrap component mapping
         for cls in original_classes:
             for rule in REACT_BOOTSTRAP_RULES.values():
                 if rule["match"](cls):
-                    tag_to_process.name = rule["component"]
+                    tag.name = rule["component"]
                     new_props.update(rule["props"](cls))
                     used_components.add(rule["component"].split(".")[0])
                     break
 
-        # Replace tag attributes with JSX-safe attributes
-        for attr, val in list(tag_to_process.attrs.items()):
+        # Variant prop extraction
+        for cls in original_classes:
+            component, variant = get_variant_from_class(cls)
+            if component and tag.name.lower() == component.lower():
+                new_props["variant"] = variant
+
+        # JSX attribute mapping
+        for attr, val in list(tag.attrs.items()):
             new_attr = JSX_ATTRIBUTE_MAP.get(attr, attr)
             if new_attr != attr:
-                del tag_to_process.attrs[attr]
-            # Handle boolean attributes from new_props, don't quote them
-            if new_attr in new_props and isinstance(new_props[new_attr], bool) and new_props[new_attr] is True:
-                tag_to_process.attrs[new_attr] = None  # Renders as just the attribute name
-            else:
-                tag_to_process.attrs[new_attr] = val
+                del tag.attrs[attr]
+            tag.attrs[new_attr] = val
 
-        # Merge bootstrap props
+        # Merge props into tag
         for prop, val in new_props.items():
             if isinstance(val, bool) and val is True:
-                tag_to_process.attrs[prop] = None  # this will render as just `prop`
+                tag.attrs[prop] = None
             else:
-                # If the prop already exists (e.g., from original HTML), prefer the rule's value
-                if prop not in tag_to_process.attrs or not isinstance(tag_to_process.attrs[prop], str):
-                    tag_to_process.attrs[prop] = val
+                tag.attrs[prop] = val
 
-        # Remove redundant className after processing
-        if "className" in tag_to_process.attrs:
-            class_val = tag_to_process.attrs["className"]
+        # Clean className
+        if "className" in tag.attrs:
+            class_val = tag.attrs["className"]
             existing_classes = class_val if isinstance(class_val, list) else str(class_val).split()
-            component_type = tag_to_process.name.split(".")[
-                0] if '.' in tag_to_process.name else tag_to_process.name
+            component_type = tag.name.split(".")[0]
+
             cleaned = []
             for cls in existing_classes:
-                is_redundant = False
-                for rule in REACT_BOOTSTRAP_RULES.values():
-                    # Check if the class is directly matched by a rule that assigned a component
-                    # and that component's base name matches the current tag's base name
-                    if rule["match"](cls) and rule["component"].split(".")[0] == component_type:
-                        is_redundant = True
-                        break
-                if not is_redundant:
-                    cleaned.append(cls)
+                if should_strip_class(cls, component_type):
+                    continue
+                cleaned.append(cls)
 
             if cleaned:
-                tag_to_process.attrs["className"] = " ".join(cleaned)
+                tag.attrs["className"] = " ".join(cleaned)
             else:
-                del tag_to_process.attrs["className"]
+                del tag.attrs["className"]
 
-    # Final JSX string generation
-    tsx_html_string = str(tsx_soup).strip()
+    tsx = str(tsx_soup).strip()
+    tsx = re.sub(r"<br>", "<br />", tsx)
+    tsx = re.sub(r"\s+/>\s*", " />", tsx)
 
-    # Post-process for self-closing tags (Gemini placeholders no longer needed)
-    tsx_html_string = re.sub(r"<br>", "<br />", tsx_html_string)
-    tsx_html_string = re.sub(r"<img([^>]*)>", r"<img\1 />", tsx_html_string)
-    tsx_html_string = re.sub(r"<input([^>]*)>", r"<input\1 />", tsx_html_string)
-    tsx_html_string = re.sub(r"<hr>", "<hr />", tsx_html_string)
-    tsx_html_string = re.sub(r"\s+/>\s*", " />", tsx_html_string) # Clean up extra spaces before self-closing slash
-
-    # Add React Bootstrap imports
-    imports = ""
-    if used_components:
-        imports += f"import {{ {', '.join(sorted(used_components))} }} from 'react-bootstrap';\n"
-
-    # gemini_component_definitions is no longer needed
-    # gemini_component_definitions = ""
-    # for name, code in gemini_components.items():
-    #     ...
-
-    final_code = f"""
-import React from 'react';
-{imports}
-
-const Page = () => {{
+    imports = f"import {{ {', '.join(sorted(used_components))} }} from 'react-bootstrap';\n\n" if used_components else ""
+    return f"""{imports}const Page = () => {{
   return (
     <>
-      {tsx_html_string}
+      {tsx}
     </>
   );
 }};
 
 export default Page;
 """
-    return final_code.strip()
